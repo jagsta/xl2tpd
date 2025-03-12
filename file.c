@@ -41,12 +41,17 @@ int init_config ()
     int returnedValue;
 
     gconfig.port = UDP_LISTEN_PORT;
+    gconfig.sarefnum = IP_IPSEC_REFINFO; /* default use the latest we know */
+    gconfig.ipsecsaref = 0; /* default off - requires patched KLIPS kernel module */
+    gconfig.forceuserspace = 0; /* default off - allow kernel decap of data packets */
     gconfig.listenaddr = htonl(INADDR_ANY); /* Default is to bind (listen) to all interfaces */
     gconfig.debug_avp = 0;
     gconfig.debug_network = 0;
     gconfig.packet_dump = 0;
     gconfig.debug_tunnel = 0;
     gconfig.debug_state = 0;
+    gconfig.max_retries = DEFAULT_MAX_RETRIES;
+    gconfig.cap_backoff = 0;
     lnslist = NULL;
     laclist = NULL;
     deflac = (struct lac *) calloc (1, sizeof (struct lac));
@@ -73,7 +78,6 @@ int init_config ()
     returnedValue = parse_config (f);
     fclose (f);
     return (returnedValue);
-    filerr[0] = 0;
 }
 
 struct lns *new_lns ()
@@ -102,6 +106,7 @@ struct lns *new_lns ()
     tmp->hostname[0] = 0;
     tmp->entname[0] = 0;
     tmp->range = NULL;
+    tmp->localrange = NULL;
     tmp->assign_ip = 1;                /* default to 'yes' */
     tmp->lacs = NULL;
     tmp->passwdauth = 0;
@@ -118,6 +123,7 @@ struct lns *new_lns ()
     tmp->proxyauth = 0;
     tmp->challenge = 0;
     tmp->debug = 0;
+    tmp->pass_peer = 0;
     tmp->pppoptfile[0] = 0;
     tmp->t = NULL;
     return tmp;
@@ -161,6 +167,7 @@ struct lac *new_lac ()
     tmp->rtimeout = 30;
     tmp->active = 0;
     tmp->debug = 0;
+    tmp->pass_peer = 0;
     tmp->pppoptfile[0] = 0;
     tmp->defaultroute = 0;
     return tmp;
@@ -211,6 +218,7 @@ int set_int (char *word, char *value, int *ptr)
 
 int set_string (char *word, char *value, char *ptr, int len)
 {
+    UNUSED(word);
 #ifdef DEBUG_FILE
     l2tp_log (LOG_DEBUG, "set_%s: %s  flag to '%s'\n", word, word, value);
 #endif /* ; */
@@ -224,7 +232,7 @@ int set_port (char *word, char *value, int context, void *item)
     {
     case CONTEXT_GLOBAL:
 #ifdef DEBUG_FILE
-        l2tp_log (LOG_DEBUG, "set_port: Setting global port number to %s\n",
+        l2tp_log (LOG_DEBUG, "set_maxretries: Setting global max retries to %s\n",
              value);
 #endif
         set_int (word, value, &(((struct global *) item)->port));
@@ -348,6 +356,46 @@ int set_speed (char *word, char *value, int context, void *item)
     return 0;
 }
 
+int set_maxretries (char *word, char *value, int context, void *item)
+{
+    switch (context & ~CONTEXT_DEFAULT)
+    {
+    case CONTEXT_GLOBAL:
+#ifdef DEBUG_FILE
+        l2tp_log (LOG_DEBUG, "set_port: Setting global max retries to %s\n",
+             value);
+#endif
+        set_int (word, value, &(((struct global *) item)->max_retries));
+        break;
+    default:
+        snprintf (filerr, sizeof (filerr), "'%s' not valid in this context\n",
+                  word);
+        return -1;
+    }
+    return 0;
+
+}
+
+int set_capbackoff (char *word, char *value, int context, void *item)
+{
+    switch (context & ~CONTEXT_DEFAULT)
+    {
+    case CONTEXT_GLOBAL:
+#ifdef DEBUG_FILE
+        l2tp_log (LOG_DEBUG, "set_capbackoff: Setting global cap backoff to %s\n",
+             value);
+#endif
+        set_int (word, value, &(((struct global *) item)->cap_backoff));
+        break;
+    default:
+        snprintf (filerr, sizeof (filerr), "'%s' not valid in this context\n",
+                  word);
+        return -1;
+    }
+    return 0;
+
+}
+
 int set_rmax (char *word, char *value, int context, void *item)
 {
     if (atoi (value) < 1)
@@ -415,7 +463,7 @@ int set_autodial (char *word, char *value, int context, void *item)
 
 int set_flow (char *word, char *value, int context, void *item)
 {
-    int v;
+    int v = -1;
     set_boolean (word, value, &v);
     if (v < 0)
         return -1;
@@ -598,6 +646,26 @@ int set_debug (char *word, char *value, int context, void *item)
         break;
     case CONTEXT_LNS:
         if (set_boolean (word, value, &(((struct lns *) item)->debug)))
+            return -1;
+        break;
+    default:
+        snprintf (filerr, sizeof (filerr), "'%s' not valid in this context\n",
+                  word);
+        return -1;
+    }
+    return 0;
+}
+
+int set_pass_peer (char *word, char *value, int context, void *item)
+{
+    switch (context & ~CONTEXT_DEFAULT)
+    {
+    case CONTEXT_LAC:
+        if (set_boolean (word, value, &(((struct lac *) item)->pass_peer)))
+            return -1;
+        break;
+    case CONTEXT_LNS:
+        if (set_boolean (word, value, &(((struct lns *) item)->pass_peer)))
             return -1;
         break;
     default:
@@ -855,7 +923,7 @@ struct iprange *set_range (char *word, char *value, struct iprange *in)
                   "format is '%s <host or ip> - <host or ip>'\n", word);
         return NULL;
     }
-    ipr = (struct iprange *) malloc (sizeof (struct iprange));
+    ipr = malloc (sizeof (struct iprange));
     ipr->next = NULL;
     hp = gethostbyname (value);
     if (!hp)
@@ -867,19 +935,27 @@ struct iprange *set_range (char *word, char *value, struct iprange *in)
     bcopy (hp->h_addr, &ipr->start, sizeof (unsigned int));
     if (c)
     {
+		char ip_hi[16];
+
 		e = d;
 		while(*e != '\0') {
 			if (*e++ == '.')
 				count++;
 		}
-		if (count != 3) {
-			char ip_hi[16];
-
+		if (count < 3) {
 			strcpy(ip_hi, value);
-			e = strrchr(ip_hi, '.')+1;
+			for (e = ip_hi + sizeof(ip_hi); e >= ip_hi; e--) {
+				if (*e == '.') count--;
+				if (count < 0) {
+					e++;
+					break;
+				}
+			}
 			/* Copy the last field + null terminator */
-			strcpy(e, d);
-			d = ip_hi;
+			if ((size_t)(ip_hi + sizeof(ip_hi)-e) > strlen(d)) {
+				strcpy(e, d);
+				d = ip_hi;
+			}
 		}
         hp = gethostbyname (d);
         if (!hp)
@@ -936,6 +1012,34 @@ int set_iprange (char *word, char *value, int context, void *item)
     return 0;
 }
 
+int set_localiprange (char *word, char *value, int context, void *item)
+{
+    struct lns *lns = (struct lns *) item;
+    switch (context & ~CONTEXT_DEFAULT)
+    {
+    case CONTEXT_LNS:
+        break;
+    default:
+        snprintf (filerr, sizeof (filerr), "'%s' not valid in this context\n",
+                  word);
+        return -1;
+    }
+
+    if (lns->localaddr) {
+        snprintf (filerr, sizeof (filerr), "'local ip range' and 'local ip' are mutually exclusive\n");
+	return -1;
+    }
+
+    lns->localrange = set_range (word, value, lns->localrange);
+    if (!lns->localrange)
+        return -1;
+#ifdef DEBUG_FILE
+    l2tp_log (LOG_DEBUG, "range start = %x, end = %x, sense=%ud\n",
+         ntohl (lns->range->start), ntohl (lns->range->end), lns->range->sense);
+#endif
+    return 0;
+}
+
 int set_lac (char *word, char *value, int context, void *item)
 {
     struct lns *lns = (struct lns *) item;
@@ -976,6 +1080,7 @@ int set_exclusive (char *word, char *value, int context, void *item)
 
 int set_ip (char *word, char *value, unsigned int *addr)
 {
+    UNUSED(word);
     struct hostent *hp;
     hp = gethostbyname (value);
     if (!hp)
@@ -1019,6 +1124,11 @@ int set_localaddr (char *word, char *value, int context, void *item)
         return set_ip (word, value, &(l->localaddr));
     case CONTEXT_LNS:
         n = (struct lns *) item;
+        if (n->localrange) {
+            snprintf (filerr, sizeof (filerr),
+                    "'local ip range' and 'local ip' are mutually exclusive\n");
+            return -1;
+        }
         return set_ip (word, value, &(n->localaddr));
     default:
         snprintf (filerr, sizeof (filerr), "'%s' not valid in this context\n",
@@ -1119,10 +1229,11 @@ int set_ipsec_saref (char *word, char *value, int context, void *item)
 		(word, value, &(g->ipsecsaref)))
 		    return -1;
 	    if(g->ipsecsaref) {
-		    l2tp_log(LOG_WARNING, "Enabling IPsec SAref processing for L2TP transport mode SAs\n");
+		    l2tp_log(LOG_INFO, "Enabling IPsec SAref processing for L2TP transport mode SAs\n");
 	    }
 	    if(g->forceuserspace != 1) {
-		    l2tp_log(LOG_WARNING, "IPsec SAref does not work with L2TP kernel mode yet, enabling forceuserspace=yes\n");
+		    l2tp_log(LOG_WARNING, "IPsec SAref does not work with L2TP kernel mode yet, enabling force userspace=yes\n");
+		    g->forceuserspace = 1;
 	    }
 	    break;
     default:
@@ -1130,6 +1241,21 @@ int set_ipsec_saref (char *word, char *value, int context, void *item)
 		      word);
 	    return -1;
     }
+    return 0;
+}
+
+int set_saref_num (char *word, char *value, int context, void *item)
+{
+	switch (context & ~CONTEXT_DEFAULT)
+	{
+	case CONTEXT_GLOBAL:
+		l2tp_log (LOG_INFO, "Setting SAref IP_IPSEC_REFINFO number to %s\n", value);
+		set_int (word, value, &(((struct global *) item)->sarefnum));
+		break;
+	default:
+		snprintf (filerr, sizeof (filerr), "'%s' not valid in this context\n", word);
+		return -1;
+	}
     return 0;
 }
 
@@ -1141,6 +1267,7 @@ int set_rand_dev ()
 
 int set_rand_egd (char *value)
 {
+    UNUSED(value);
     l2tp_log(LOG_WARNING, "%s: not yet implemented!\n", __FUNCTION__);
     rand_source = RAND_EGD;
     return -1;
@@ -1148,6 +1275,7 @@ int set_rand_egd (char *value)
 
 int set_rand_source (char *word, char *value, int context, void *item)
 {
+    UNUSED(item);
     time_t seconds;
     /*
      * We're going to go ahead and seed the rand() function with srand()
@@ -1205,11 +1333,12 @@ int parse_config (FILE * f)
     /* Read in the configuration file handed to us */
     /* FIXME: I should check for incompatible options */
     int context = 0;
-    char buf[STRLEN];
+    char buf[1024]; 
     char *s, *d, *t;
     int linenum = 0;
     int def = 0;
-    struct keyword *kw;
+    int in_comment = 0;
+    int has_lf;
     void *data = NULL;
     struct lns *tl;
     struct lac *tc;
@@ -1220,11 +1349,20 @@ int parse_config (FILE * f)
             /* Error or EOL */
             break;
         }
+        /* Watch for continuation comments. */
+        has_lf = buf[strlen(buf) - 1] == '\n';
+        if (in_comment)
+        {
+            in_comment = !has_lf;
+            continue;
+        }
         linenum++;
         s = buf;
         /* Strip comments */
         while (*s && *s != ';')
             s++;
+        if (*s == ';' && !has_lf)
+            in_comment = 1;
         *s = 0;
         s = buf;
         if (!strlen (buf))
@@ -1372,7 +1510,7 @@ int parse_config (FILE * f)
             }
             if (!(t = strchr (s, '=')))
             {
-                l2tp_log (LOG_WARNING, "parse_config: line %d: no '=' in data\n",
+                l2tp_log (LOG_WARNING, "parse_config: line %d: line too long or no '=' in data\n",
                      linenum);
                 return -1;
             }
@@ -1388,27 +1526,42 @@ int parse_config (FILE * f)
 #ifdef DEBUG_FILE
             l2tp_log (LOG_DEBUG, "parse_config: field is %s, value is %s\n", s, t);
 #endif
-            /* Okay, bit twidling is done.  Let's handle this */
-            for (kw = words; kw->keyword; kw++)
+            /* Okay, bit twiddling is done.  Let's handle this */
+            
+            switch (parse_one_option (s, t, context | def, data))
             {
-                if (!strcasecmp (s, kw->keyword))
-                {
-                    if (kw->handler (s, t, context | def, data))
-                    {
-                        l2tp_log (LOG_WARNING, "parse_config: line %d: %s", linenum,
+            case -1:
+                l2tp_log (LOG_WARNING, "parse_config: line %d: %s", linenum,
                              filerr);
-                        return -1;
-                    }
-                    break;
-                }
-            }
-            if (!kw->keyword)
-            {
+                return -1;
+            case -2:
                 l2tp_log (LOG_CRIT, "parse_config: line %d: Unknown field '%s'\n",
                      linenum, s);
                 return -1;
-            }
+            }            
         }
+    }
+    return 0;
+}
+
+int parse_one_option(char *word, char *value, int context, void *item)
+{
+    struct keyword *kw;
+    
+    for (kw = words; kw->keyword; kw++)
+    {
+        if (!strcasecmp (word, kw->keyword))
+        {
+            if (kw->handler (word, value, context, item))
+            {
+                return -1;
+            }
+            break;
+        }
+    }
+    if (!kw->keyword)
+    {
+        return -2;
     }
     return 0;
 }
@@ -1416,6 +1569,7 @@ int parse_config (FILE * f)
 struct keyword words[] = {
     {"listen-addr", &set_listenaddr},
     {"port", &set_port},
+    {"saref refinfo", &set_saref_num},
     {"rand source", &set_rand_source},
     {"auth file", &set_authfile},
     {"exclusive", &set_exclusive},
@@ -1438,6 +1592,7 @@ struct keyword words[] = {
     {"no lac", &set_lac},
     {"assign ip", &set_assignip},
     {"local ip", &set_localaddr},
+    {"local ip range", &set_localiprange},
     {"remote ip", &set_remoteaddr},
     {"defaultroute", &set_defaultroute},
     {"length bit", &set_lbit},
@@ -1455,6 +1610,7 @@ struct keyword words[] = {
     {"name", &set_authname},
     {"hostname", &set_hostname},
     {"ppp debug", &set_debug},
+    {"pass peer", &set_pass_peer},
     {"pppoptfile", &set_pppoptfile},
     {"call rws", &set_rws},
     {"tunnel rws", &set_rws},
@@ -1463,5 +1619,7 @@ struct keyword words[] = {
     {"tx bps", &set_speed},
     {"rx bps", &set_speed},
     {"bps", &set_speed},
+    {"max retries" , &set_maxretries},
+    {"cap backoff" , &set_capbackoff},
     {NULL, NULL}
 };

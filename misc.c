@@ -49,6 +49,7 @@ int sockaddr_cmp(struct in6_addr a1, struct in6_addr a2) {
             return a1.s6_addr[i] - a2.s6_addr[i];
     return 0;
 }
+#define UNUSED(x) (void)(x)
 
 void init_log()
 {
@@ -62,13 +63,13 @@ void init_log()
 
 void l2tp_log (int level, const char *fmt, ...)
 {
-    char buf[256];
+    char buf[2048];
     va_list args;
     va_start (args, fmt);
     vsnprintf (buf, sizeof (buf), fmt, args);
     va_end (args);
     
-    if(gconfig.daemon) {
+    if(gconfig.syslog) {
 	init_log();
 	SYSLOG_CALL( syslog (level, "%s", buf) );
     } else {
@@ -91,10 +92,15 @@ void set_error (struct call *c, int error, const char *fmt, ...)
 
 struct buffer *new_buf (int size)
 {
-    struct buffer *b = malloc (sizeof (struct buffer));
+    struct buffer *b = NULL;
 
-    if (!b || !size || size < 0)
+    if (!size || size < 0)
         return NULL;
+
+    b = malloc (sizeof (struct buffer));
+    if (!b)
+        return NULL;
+
     b->rstart = malloc (size);
     if (!b->rstart)
     {
@@ -126,7 +132,7 @@ void bufferDump (unsigned char *buf, int buflen)
         c = line;
         for (j = 0; j < bufferDumpWIDTH; j++)
         {
-	  sprintf (c, "%02x ", (buf[i * bufferDumpWIDTH + j]) & 0xff);
+	  sprintf (c, "%02x", (buf[i * bufferDumpWIDTH + j]) & 0xff);
             c++;
             c++;                /* again two characters to display ONE byte */
         }
@@ -139,7 +145,7 @@ void bufferDump (unsigned char *buf, int buflen)
     c = line;
     for (j = 0; j < buflen % bufferDumpWIDTH; j++)
     {
-        sprintf (c, "%02x ",
+        sprintf (c, "%02x",
                  buf[(buflen / bufferDumpWIDTH) * bufferDumpWIDTH +
                      j] & 0xff);
         c++;
@@ -156,7 +162,7 @@ void bufferDump (unsigned char *buf, int buflen)
 
 void do_packet_dump (struct buffer *buf)
 {
-    int x;
+    size_t x;
     unsigned char *c = buf->start;
     printf ("packet dump: \nHEX: { ");
     for (x = 0; x < buf->len; x++)
@@ -181,7 +187,7 @@ void do_packet_dump (struct buffer *buf)
     printf ("}\n");
 }
 
-inline void swaps (void *buf_v, int len)
+void swaps (void *buf_v, int len)
 {
 #ifdef __alpha
     /* Reverse byte order alpha is little endian so lest save a step.
@@ -230,13 +236,13 @@ struct ppp_opts *add_opt (struct ppp_opts *option, char *fmt, ...)
 {
     va_list args;
     struct ppp_opts *new, *last;
-    new = (struct ppp_opts *) malloc (sizeof (struct ppp_opts));
+    new = malloc (sizeof (struct ppp_opts));
     if (!new)
     {
         l2tp_log (LOG_WARNING,
 		  "%s : Unable to allocate ppp option memory.  Expect a crash\n",
 		  __FUNCTION__);
-        return NULL;
+        return option;
     }
     new->next = NULL;
     va_start (args, fmt);
@@ -266,6 +272,8 @@ void opt_destroy (struct ppp_opts *option)
 
 int get_egd_entropy(char *buf, int count)
 {
+    UNUSED(buf);
+    UNUSED(count);
     return -1;
 }
 

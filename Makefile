@@ -7,6 +7,9 @@
 # This is free software.  You may distribute it under
 # the terms of the GNU General Public License,
 # version 2, or at your option any later version.
+
+include Makefile.ver
+
 #
 # Note on debugging flags:
 # -DDEBUG_ZLB shows all ZLB exchange traffic
@@ -62,12 +65,18 @@ OSFLAGS?= -DLINUX -I$(KERNELSRC)/include/
 # are packages seperately (eg kernel-headers on Fedora)
 # Note: 2.6.23+ support still needs some changes in the xl2tpd source
 #
-#OSFLAGS+= -DUSE_KERNEL
+OSFLAGS+= -DUSE_KERNEL
 #
 #
 # Uncomment the next line for FreeBSD
 #
 #OSFLAGS?= -DFREEBSD
+#
+# Uncomment the next three lines for NetBSD
+#
+#OSFLAGS?= -DNETBSD
+#CFLAGS+= -D_NETBSD_SOURCE
+#LDLIBS?= -lutil
 #
 # Uncomment the next line for Solaris. For solaris, at least,
 # we don't want to specify -I/usr/include because it is in
@@ -75,7 +84,8 @@ OSFLAGS?= -DLINUX -I$(KERNELSRC)/include/
 # include paths and cause problems.
 #
 #CC?=gcc
-#OSFLAGS?= -DSOLARIS
+# Change /opt/sfw/ to whereever your pcap library/include files are
+#OSFLAGS?= -DSOLARIS -DPPPD=\"/usr/bin/pppd\" -std=c99 -pedantic -D__EXTENSIONS__ -D_XPG4_2 -D_XPG6 -I/opt/sfw/include
 #OSLIBS?= -lnsl -lsocket
 
 # Uncomment the next two lines for OpenBSD
@@ -90,12 +100,14 @@ OSFLAGS?= -DLINUX -I$(KERNELSRC)/include/
 
 IPFLAGS?= -DIP_ALLOCATION
 
-CFLAGS+= $(DFLAGS) -O2 -fno-builtin -Wall -DSANITY $(OSFLAGS) $(IPFLAGS)
+CFLAGS+= $(DFLAGS) -Os -Wall -Wextra -DSANITY $(OSFLAGS) $(IPFLAGS)
 HDRS=l2tp.h avp.h misc.h control.h call.h scheduler.h file.h aaa.h md5.h
 OBJS=xl2tpd.o pty.o misc.o control.o avp.o call.o network.o avpsend.o scheduler.o file.o aaa.o md5.o
 SRCS=${OBJS:.o=.c} ${HDRS}
+CONTROL_SRCS=xl2tpd-control.c
 #LIBS= $(OSLIBS) # -lefence # efence for malloc checking
 EXEC=xl2tpd
+CONTROL_EXEC=xl2tpd-control
 
 PREFIX?=/usr/local
 SBINDIR?=$(DESTDIR)${PREFIX}/sbin
@@ -103,13 +115,16 @@ BINDIR?=$(DESTDIR)${PREFIX}/bin
 MANDIR?=$(DESTDIR)${PREFIX}/share/man
 
 
-all: $(EXEC) pfc
+all: $(EXEC) pfc $(CONTROL_EXEC)
 
 clean:
-	rm -f $(OBJS) $(EXEC) pfc.o pfc
+	rm -f $(OBJS) $(EXEC) pfc.o pfc $(CONTROL_EXEC)
 
 $(EXEC): $(OBJS) $(HDRS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
+
+$(CONTROL_EXEC): $(CONTROL_SRCS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(CONTROL_SRCS) -o $@
 
 pfc:
 	$(CC) $(CFLAGS) -c contrib/pfc.c
@@ -118,12 +133,22 @@ pfc:
 romfs:
 	$(ROMFSINST) /bin/$(EXEC)
 
-install: ${EXEC} pfc
+version:
+	@echo ${XL2TPDVERSION}
+
+packagingprep:
+	sed -i "s/XL2TPDVERSION=.*/XL2TPDVERSION=${XL2TPDBASEVERSION}/" Makefile.ver
+	sed -i "s/#define SERVER_VERSION .*/#define SERVER_VERSION \"xl2tpd-${XL2TPDBASEVERSION}\"/" l2tp.h
+	sed -i "s/Version: .*/Version: ${XL2TPDBASEVERSION}/" packaging/*/*.spec
+	sed -i "s/PKG_VERSION:=.*/PKG_VERSION:=${XL2TPDBASEVERSION}/" packaging/openwrt/Makefile
+
+install: ${EXEC} pfc ${CONTROL_EXEC}
 	install -d -m 0755 ${SBINDIR}
 	install -m 0755 $(EXEC) ${SBINDIR}/$(EXEC)
 	install -d -m 0755 ${MANDIR}/man5
 	install -d -m 0755 ${MANDIR}/man8
 	install -m 0644 doc/xl2tpd.8 ${MANDIR}/man8/
+	install -m 0644 doc/xl2tpd-control.8 ${MANDIR}/man8/
 	install -m 0644 doc/xl2tpd.conf.5 doc/l2tp-secrets.5 \
 		 ${MANDIR}/man5/
 	# pfc
@@ -131,7 +156,10 @@ install: ${EXEC} pfc
 	install -m 0755 pfc ${BINDIR}/pfc
 	install -d -m 0755 ${MANDIR}/man1
 	install -m 0644 contrib/pfc.1 ${MANDIR}/man1/
-
+	# control exec
+	install -d -m 0755 ${SBINDIR}
+	install -m 0755 $(CONTROL_EXEC) ${SBINDIR}/$(CONTROL_EXEC)
+	
 # openbsd
 #	install -d -m 0755 /var/run/xl2tpd
 #	mkfifo /var/run/l2tp-control
