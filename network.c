@@ -29,6 +29,7 @@
 #include "l2tp.h"
 #include "ipsecmast.h"
 #include "misc.h"    /* for IPADDY macro */
+#include "network.h"
 
 char hostname[256];
 struct sockaddr_in server, from;        /* Server and transmitter structs */
@@ -36,6 +37,78 @@ int server_socket;              /* Server socket */
 #ifdef USE_KERNEL
 int kernel_support;             /* Kernel Support there or not? */
 #endif
+
+int resolve_hostname(const char *hostname, struct xl2tpd_ip_addr *addr) {
+    struct addrinfo hints, *result;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC; // Allow IPv4 or IPv6
+    hints.ai_socktype = SOCK_DGRAM;
+
+    int ret = getaddrinfo(hostname, NULL, &hints, &result);
+    if (ret != 0) {
+        return -1;
+    }
+
+    // Prefer IPv6 if available
+    struct addrinfo *rp;
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        if (rp->ai_family == AF_INET6) {
+            addr->family = AF_INET6;
+            memcpy(&addr->addr.v6, &((struct sockaddr_in6 *)rp->ai_addr)->sin6_addr, sizeof(struct in6_addr));
+            freeaddrinfo(result);
+            return 0;
+        }
+    }
+
+    // Fall back to IPv4 if no IPv6 found
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        if (rp->ai_family == AF_INET) {
+            addr->family = AF_INET;
+            memcpy(&addr->addr.v4, &((struct sockaddr_in *)rp->ai_addr)->sin_addr, sizeof(struct in_addr));
+            freeaddrinfo(result);
+            return 0;
+        }
+    }
+
+    freeaddrinfo(result);
+    return -1;
+}
+
+int init_network_ipv6(void) {
+    int sock = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        return -1;
+    }
+
+    int ipv6_only = 1;
+    if (setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6_only, sizeof(ipv6_only)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    return sock;
+}
+
+int bind_ipv6_socket(int sock, struct xl2tpd_ip_addr *addr, int port) {
+    struct sockaddr_in6 saddr;
+    memset(&saddr, 0, sizeof(saddr));
+    saddr.sin6_family = AF_INET6;
+    saddr.sin6_port = htons(port);
+    memcpy(&saddr.sin6_addr, &addr->addr.v6, sizeof(struct in6_addr));
+
+    return bind(sock, (struct sockaddr *)&saddr, sizeof(saddr));
+}
+
+int connect_ipv6_peer(int sock, struct xl2tpd_ip_addr *addr, int port) {
+    struct sockaddr_in6 saddr;
+    memset(&saddr, 0, sizeof(saddr));
+    saddr.sin6_family = AF_INET6;
+    saddr.sin6_port = htons(port);
+    memcpy(&saddr.sin6_addr, &addr->addr.v6, sizeof(struct in6_addr));
+
+    return connect(sock, (struct sockaddr *)&saddr, sizeof(saddr));
+}
+
 
 int init_network (void)
 {
