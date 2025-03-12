@@ -157,8 +157,8 @@ static void show_status (void)
                  " control_seq_num = %d, control_rec_seq_num = %d,"
                  " cLr = %d, call count = %d ref=%u/refhim=%u",
                  (t->lac ? t->lac->entname : (t->lns ? t->lns->entname : "")),
-                 t->ourtid, t->tid, IPADDY (t->peer.sin_addr),
-                 ntohs (t->peer.sin_port), t->control_seq_num,
+                 t->ourtid, t->tid, IPADDY (t->peer.sin6_addr),
+                 ntohs (t->peer.sin6_port), t->control_seq_num,
                   t->control_rec_seq_num, t->cLr, t->count,
                   t->refme, t->refhim);
         c = t->call_head;
@@ -432,10 +432,11 @@ int start_pppd (struct call *c, struct ppp_opts *opts)
        memset(&sax, 0, sizeof(sax));
        sax.sa_family = AF_PPPOX;
        sax.sa_protocol = PX_PROTO_OL2TP;
-       sax.pppol2tp.fd = c->container->udp_fd;
-       sax.pppol2tp.addr.sin_addr.s_addr = c->container->peer.sin_addr.s_addr;
-       sax.pppol2tp.addr.sin_port = c->container->peer.sin_port;
-       sax.pppol2tp.addr.sin_family = AF_INET;
+       sax.pppol2tp.pid = 0;
+       sax.pppol2tp.fd = server_socket;
+       sax.pppol2tp.addr.sin6_addr.s_addr = c->container->peer.sin6_addr.s_addr;
+       sax.pppol2tp.addr.sin6_port = c->container->peer.sin6_port;
+       sax.pppol2tp.addr.sin6_family = AF_INET;
        sax.pppol2tp.s_tunnel  = c->container->ourtid;
        sax.pppol2tp.s_session = c->ourcid;
        sax.pppol2tp.d_tunnel  = c->container->tid;
@@ -702,12 +703,22 @@ static struct tunnel *l2tp_call (char *host, int port, struct lac *lac,
      * on port port
      */
     struct call *tmp = NULL;
-    struct hostent *hp;
-    struct in_addr addr;
+    //struct hostent *hp;
+    struct in6_addr addr;
+    int rv;
+    struct addrinfo hints, *si;
     port = htons (port);
-    hp = gethostbyname (host);
-    if (!hp)
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET6;
+    hints.ai_flags = AI_V4MAPPED;
+    if ((rv = getaddrinfo(host, NULL, &hints, &si)) != 0)
+    //hp = gethostbyname2 (host, AF_INET6);
+    //if (!hp)
     {
+
+    addr = ((struct sockaddr_in6 *)si->ai_addr)->sin6_addr;
+
         l2tp_log (LOG_WARNING, "Host name lookup failed for %s.\n",
              host);
         if (lac->redial && (lac->rtimeout > 0) && !lac->rsched && lac->active)
@@ -882,7 +893,7 @@ static void lac_disconnect (int tid)
         {
             l2tp_log (LOG_INFO,
                  "Disconnecting from %s, Local: %d, Remote: %d\n",
-                 IPADDY (t->peer.sin_addr), t->ourtid, t->tid);
+                 IPADDY (t->peer.sin6_addr), t->ourtid, t->tid);
             t->self->needclose = -1;
             strcpy (t->self->errormsg, "Goodbye!");
             call_close (t->self);
@@ -919,8 +930,8 @@ struct tunnel *new_tunnel ()
 #else
     tmp->ourtid = 0x6227;
 #endif
-    tmp->peer.sin_family = AF_INET;
-    bzero (&(tmp->peer.sin_addr), sizeof (tmp->peer.sin_addr));
+    tmp->peer.sin6_family = AF_INET6;
+    bzero (&(tmp->peer.sin6_addr), sizeof (tmp->peer.sin6_addr));
 #ifdef SANITY
     tmp->sanity = -1;
 #endif
@@ -1855,7 +1866,7 @@ static void open_controlfd()
 static void init (int argc,char *argv[])
 {
     struct lac *lac;
-    struct in_addr listenaddr;
+    struct in6_addr listenaddr;
     struct utsname uts;
 
     init_args (argc,argv);
@@ -1901,10 +1912,11 @@ static void init (int argc,char *argv[])
             "Written by Mark Spencer, Copyright (C) 1998, Adtran, Inc.\n");
     l2tp_log (LOG_INFO, "Forked by Scott Balmos and David Stipp, (C) 2001\n");
     l2tp_log (LOG_INFO, "Inherited by Jeff McAdams, (C) 2002\n");
-    l2tp_log (LOG_INFO, "Forked again by Xelerance (www.xelerance.com) (C) 2006-2016\n");
-    listenaddr.s_addr = gconfig.listenaddr;
+    l2tp_log (LOG_INFO, "Forked again by Xelerance (www.xelerance.com) (C) 2006\n");
+    //listenaddr.s_addr = gconfig.listenaddr;
+    listenaddr = in6addr_any;
     l2tp_log (LOG_INFO, "Listening on IP address %s, port %d\n",
-            inet_ntoa(listenaddr), gconfig.port);
+              IPADDY(listenaddr), gconfig.port);
     lac = laclist;
     while (lac)
     {
